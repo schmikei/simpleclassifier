@@ -1,10 +1,11 @@
 import os
+import argparse
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.parallel
-import torch.optim
+from torch.optim import Adam
 from torch.optim import lr_scheduler
 import torch.utils.data
 import torch.utils.data.distributed
@@ -16,32 +17,8 @@ import copy
 import time
 from tqdm import tqdm
 
-import io
 
-import matplotlib.pyplot as plt
-import matplotlib.image as mpimgs
-import numpy as np
-
-
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
-        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
-        self.conv2_drop = nn.Dropout2d()
-        self.fc1 = nn.Linear(320, 50)
-        self.fc2 = nn.Linear(50, 10)
-
-    def forward(self, x):
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
-        x = x.view(-1, 320)
-        x = F.relu(self.fc1(x))
-        x = F.dropout(x, training=self.training)
-        x = self.fc2(x)
-        return F.log_softmax(x, dim=1)
-
-
+#save pytorch model
 def save_model(model, model_path):
     print("Saving the model.")
     torch.save(model.cpu().state_dict(), model_path)
@@ -152,6 +129,10 @@ def predict(model, image):
     return class_names[predicted[0]]
 
 def imshow(imgs , title = None):
+    import matplotlib.pyplot as plt
+    #import matplotlib.image as mpimgs
+    import numpy as np
+
     imgs = imgs.numpy().transpose(1,2,0)
     mean = np.array([0.485, 0.456, 0.406])
     std = np.array ([0.229, .224, 0.225])
@@ -192,41 +173,53 @@ def predict_batch(model, dataloaders):
 
 
 
-model = models.resnet18(pretrained=False)
-data_folder = 'Marine'
-trainval = ['Train', 'Val']
-image_transforms= {'Train': transforms.Compose([
-            transforms.Resize([64,64]),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ]),
-        'Val': transforms.Compose([
-            transforms.Resize([64,64]),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])}
-dataset = get_data_sets(data_folder, trainval, image_transforms)
-dataset_sizes = get_data_set_length(dataset)
-dataloaders = get_data_loaders(dataset , data_folder, trainval)
-class_names = dataset['Train'].classes
-device = "cuda" if torch.cuda.is_available() else "cpu"
+#performing transfer learning because It will speed up recognition of in_features
 
-num_final_in = model.fc.in_features
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("data_folder", help="Root data folder with Train and Val folders. This folder must have proper structure",
+                        type=str)
+    parser.add_argument("--save_at", help="flag to identify where to save the model ",
+                        type=str, nargs = '?', default = 'model.pt')
+    parser.add_argument("--load", help="flag to identify that we want to load the model and not start from scratch ",
+                        type=bool, nargs = '?', default = True)
+    args = parser.parse_args()
+    model = models.resnet18(pretrained=False)
+    data_folder = args.data_folder
+    trainval = ['Train', 'Val']
+    image_transforms= {'Train': transforms.Compose([
+    transforms.Resize([64,64]),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ]),
+    'Val': transforms.Compose([
+    transforms.Resize([64,64]),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])}
+    dataset = get_data_sets(data_folder, trainval, image_transforms)
+    dataset_sizes = get_data_set_length(dataset)
+    dataloaders = get_data_loaders(dataset , data_folder, trainval)
+    class_names = dataset['Train'].classes
+    #GPU compadability
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# The final layer of the model is model.fc so we can basically just overwrite it
-#to have the output = number of classes we need. Say, 300 classes.
-NUM_CLASSES = len(class_names)
-freeze_resnet_layers(model,num_final_in-4)
-model.avgpool = nn.AdaptiveAvgPool2d(1)
-model = model.to(device)
-model.fc = nn.Linear(num_final_in, NUM_CLASSES)
-
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(list(filter(lambda p: p.requires_grad, model.parameters())), lr=0.005)
-exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
-
-model = train(model, dataloaders,dataset_sizes, criterion, optimizer, exp_lr_scheduler, num_epochs = 15 )
+    if not args.load:
+        num_final_in = model.fc.in_features
+        NUM_CLASSES = len(class_names)
+        freeze_resnet_layers(model,num_final_in-4)
+        model.avgpool = nn.AdaptiveAvgPool2d(1)
+    else:
+        model = load()
+    model = model.to(device)
+    model.fc = nn.Linear(num_final_in, NUM_CLASSES)
 
 
-path = 'model.pt'
-torch.save(model.cpu().state_dict(), path)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = Adam(list(filter(lambda p: p.requires_grad, model.parameters())), lr=0.005)
+    exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+
+    model = train(model, dataloaders,dataset_sizes, criterion, optimizer, exp_lr_scheduler, num_epochs = 15 )
+
+    path = args.save_at
+    torch.save(model, path)
